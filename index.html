@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Gestión de Inventarios Fuzzy</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <style>
+    body {
+      background-color: #f8f9fa;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+
+    header {
+      background: linear-gradient(135deg, #4a90e2, #007bff);
+      color: white;
+      padding: 3rem 0;
+      margin-bottom: 2rem;
+    }
+
+    h1, .lead {
+      color: white;
+    }
+
+    .form-label {
+      font-weight: 600;
+    }
+
+    .form-control {
+      border-radius: 0.5rem;
+      box-shadow: 0 0 5px rgba(0,0,0,0.05);
+    }
+
+    button[type="submit"] {
+      padding: 0.75rem 1.5rem;
+      font-size: 1.1rem;
+      font-weight: bold;
+      border-radius: 0.5rem;
+      box-shadow: 0 4px 10px rgba(0, 123, 255, 0.3);
+      transition: background-color 0.3s ease, transform 0.2s ease;
+    }
+
+    button[type="submit"]:hover {
+      background-color: #0056b3;
+      transform: scale(1.03);
+    }
+
+    #resultado {
+      margin-top: 2rem;
+      text-align: center;
+      font-size: 1.75rem;
+      font-weight: 600;
+      color: #333;
+      padding: 1.5rem;
+      background-color: #e2f0ff;
+      border: 2px dashed #007bff;
+      border-radius: 1rem;
+      max-width: 600px;
+      margin-left: auto;
+      margin-right: auto;
+      box-shadow: 0 4px 12px rgba(0, 123, 255, 0.1);
+      transition: all 0.3s ease-in-out;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="container text-center">
+      <h1 class="display-4 fw-bold">Gestión de Inventarios</h1>
+    </div>
+  </header>
+
+  <div class="container mt-5">
+    <form id="fuzzyForm">
+      <div class="row g-3">
+        <div class="col-md-3">
+          <label for="stock" class="form-label">Stock Actual</label>
+          <input type="number" step="any" min="0" id="stock" class="form-control" required />
+        </div>
+        <div class="col-md-3">
+          <label for="demanda" class="form-label">Demanda</label>
+          <input type="number" step="any" min="0" id="demanda" class="form-control" required />
+        </div>
+        <div class="col-md-3">
+          <label for="ventas" class="form-label">Ventas</label>
+          <input type="number" step="any" min="0" id="ventas" class="form-control" required />
+        </div>
+        <div class="col-md-3">
+          <label for="tiempo_espera" class="form-label">Tiempo de Espera (días)</label>
+          <input type="number" step="any" min="0" id="tiempo_espera" class="form-control" required />
+        </div>
+      </div>
+      <div class="text-center">
+        <button type="submit" class="btn btn-primary mt-4">Calcular Reabastecimiento</button>
+      </div>
+    </form>
+
+    <div id="resultado"></div>
+  </div>
+</main>
+
+<script>
+  let modelo = null;
+
+  async function cargarModelo() {
+    console.log("Cargando modelo fuzzy...");
+    modelo = await fetch('model.json').then(res => res.json());
+    console.log("Modelo fuzzy cargado:", modelo);
+  }
+
+  function pertenencia(x, points) {
+    if (x <= points[0][0]) return points[0][1];
+    if (x >= points[points.length - 1][0]) return points[points.length - 1][1];
+    for(let i = 0; i < points.length - 1; i++) {
+      let [x0, y0] = points[i];
+      let [x1, y1] = points[i+1];
+      if (x >= x0 && x <= x1) {
+        let t = (x - x0) / (x1 - x0);
+        return y0 + t*(y1 - y0);
+      }
+    }
+    return 0;
+  }
+
+  function inferir(modelo, inputs) {
+    const vars = modelo.variables;
+    const rules = modelo.rules;
+
+    let grados = {};
+    for (let v in vars) {
+      grados[v] = {};
+      for (let term in vars[v].mfs) {
+        grados[v][term] = pertenencia(inputs[v], vars[v].mfs[term]);
+      }
+    }
+
+    let salida = {};
+    for (let r of rules) {
+      let parts = r.split(" THEN ");
+      let antecedente = parts[0].replace("IF ", "").trim();
+      let consecuente = parts[1].trim();
+
+      let condiciones = antecedente.split(" AND ").map(cond => cond.trim());
+      let valoresCondiciones = condiciones.map(c => {
+        let [variable, , termino] = c.split(" ");
+        return grados[variable][termino] || 0;
+      });
+
+      let grado = Math.min(...valoresCondiciones);
+
+      let [, , termino_salida] = consecuente.split(" ");
+      salida[termino_salida] = salida[termino_salida] ? Math.max(salida[termino_salida], grado) : grado;
+    }
+
+    const pesos = { bajo: 0, medio: 0.5, alto: 1 };
+    let numerador = 0;
+    let denominador = 0;
+    for (let term in salida) {
+      numerador += pesos[term]*salida[term];
+      denominador += salida[term];
+    }
+    let valorDefuzzificado = denominador === 0 ? 0 : numerador/denominador;
+    let terminoMax = Object.entries(salida).reduce((a,b) => a[1]>b[1]?a:b, ["ninguno",0])[0];
+
+    return { terminoMax, valorDefuzzificado };
+  }
+
+  document.getElementById("fuzzyForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (!modelo) {
+      alert("El modelo fuzzy no está cargado aún.");
+      return;
+    }
+    const inputs = {
+      stock: parseFloat(document.getElementById("stock").value),
+      demanda: parseFloat(document.getElementById("demanda").value),
+      ventas: parseFloat(document.getElementById("ventas").value),
+      tiempo_espera: parseFloat(document.getElementById("tiempo_espera").value),
+    };
+
+    const resultado = inferir(modelo, inputs);
+
+    document.getElementById("resultado").innerText = 
+      `Reabastecer: ${resultado.terminoMax.toUpperCase()} (valor: ${resultado.valorDefuzzificado.toFixed(2)})`;
+  });
+
+  cargarModelo();
+</script>
+</body>
+</html>
